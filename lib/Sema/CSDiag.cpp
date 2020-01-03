@@ -381,7 +381,6 @@ namespace {
     llvm::DenseMap<Expr*, Type> ExprTypes;
     llvm::DenseMap<TypeLoc*, Type> TypeLocTypes;
     llvm::DenseMap<Pattern*, Type> PatternTypes;
-    llvm::DenseMap<ParamDecl*, Type> ParamDeclInterfaceTypes;
     ExprTypeSaverAndEraser(const ExprTypeSaverAndEraser&) = delete;
     void operator=(const ExprTypeSaverAndEraser&) = delete;
   public:
@@ -420,17 +419,6 @@ namespace {
           if (isa<LiteralExpr>(expr) && !isa<InterpolatedStringLiteralExpr>(expr) &&
               !(expr->getType() && expr->getType()->hasError()))
             return { false, expr };
-
-          // If a ClosureExpr's parameter list has types on the decls, then
-          // remove them so that they'll get regenerated from the
-          // associated TypeLocs or resynthesized as fresh typevars.
-          if (auto *CE = dyn_cast<ClosureExpr>(expr))
-            for (auto P : *CE->getParameters()) {
-              if (P->hasInterfaceType()) {
-                TS->ParamDeclInterfaceTypes[P] = P->getInterfaceType();
-                P->setInterfaceType(Type());
-              }
-            }
           
           expr->setType(nullptr);
 
@@ -473,12 +461,6 @@ namespace {
       
       for (auto patternElt : PatternTypes)
         patternElt.first->setType(patternElt.second);
-
-      for (auto paramDeclIfaceElt : ParamDeclInterfaceTypes) {
-        assert(!paramDeclIfaceElt.first->isImmutable() ||
-               !paramDeclIfaceElt.second->is<InOutType>());
-        paramDeclIfaceElt.first->setInterfaceType(paramDeclIfaceElt.second->getInOutObjectType());
-      }
       
       // Done, don't do redundant work on destruction.
       ExprTypes.clear();
@@ -505,33 +487,6 @@ namespace {
       for (auto patternElt : PatternTypes)
         if (!patternElt.first->hasType())
           patternElt.first->setType(patternElt.second);
-
-      for (auto paramDeclIfaceElt : ParamDeclInterfaceTypes)
-        if (!paramDeclIfaceElt.first->hasInterfaceType()) {
-          paramDeclIfaceElt.first->setInterfaceType(
-              getParamBaseType(paramDeclIfaceElt));
-        }
-    }
-
-  private:
-    static Type getParamBaseType(std::pair<ParamDecl *, Type> &storedParam) {
-      ParamDecl *param;
-      Type storedType;
-
-      std::tie(param, storedType) = storedParam;
-
-      // FIXME: We are currently in process of removing `InOutType`
-      //        so `VarDecl::get{Interface}Type` is going to wrap base
-      //        type into `InOutType` if its flag indicates that it's
-      //        an `inout` parameter declaration. But such type can't
-      //        be restored directly using `VarDecl::set{Interface}Type`
-      //        caller needs additional logic to extract base type.
-      if (auto *IOT = storedType->getAs<InOutType>()) {
-        assert(param->isInOut());
-        return IOT->getObjectType();
-      }
-
-      return storedType;
     }
   };
 } // end anonymous namespace
@@ -1617,47 +1572,6 @@ bool FailureDiagnosis::diagnoseSubscriptErrors(SubscriptExpr *SE,
 bool FailureDiagnosis::visitSubscriptExpr(SubscriptExpr *SE) {
   return diagnoseSubscriptErrors(SE, /* inAssignmentDestination = */ false);
 }
-
-namespace {
-  /// Type checking listener for pattern binding initializers.
-  class CalleeListener : public ExprTypeCheckListener {
-    Type contextualType;
-  public:
-    explicit CalleeListener(Type contextualType)
-      : contextualType(contextualType) { }
-
-    bool builtConstraints(ConstraintSystem &cs, Expr *expr) override {
-      // If we have no contextual type, there is nothing to do.
-      if (!contextualType)
-        return false;
-
-      // If the expression is obviously something that produces a metatype,
-      // then don't put a constraint on it.
-      auto semExpr = expr->getValueProvidingExpr();
-      if (isa<TypeExpr>(semExpr))
-        return false;
-
-      auto resultLocator =
-        cs.getConstraintLocator(expr, ConstraintLocator::FunctionResult);
-      auto resultType = cs.createTypeVariable(resultLocator,
-                                              TVO_CanBindToLValue |
-                                              TVO_CanBindToNoEscape);
-
-      auto locator = cs.getConstraintLocator(expr);
-      cs.addConstraint(ConstraintKind::FunctionResult,
-                       cs.getType(expr),
-                       resultType,
-                       locator);
-
-      cs.addConstraint(ConstraintKind::Conversion,
-                       resultType,
-                       contextualType,
-                       locator);
-
-      return false;
-    }
-  };
-} // end anonymous namespace
 
 // Check if there is a structural problem in the function expression
 // by performing type checking with the option to allow unresolved

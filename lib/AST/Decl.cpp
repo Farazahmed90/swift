@@ -2951,6 +2951,7 @@ Type ValueDecl::getInterfaceType() const {
 }
 
 void ValueDecl::setInterfaceType(Type type) {
+  assert(!type.isNull() && "Resetting the interface type to null is forbidden");
   getASTContext().evaluator.cacheOutput(InterfaceTypeRequest{this},
                                         std::move(type));
 }
@@ -3675,12 +3676,16 @@ void NominalTypeDecl::addExtension(ExtensionDecl *extension) {
   if (!FirstExtension) {
     FirstExtension = extension;
     LastExtension = extension;
+
+    addedExtension(extension);
     return;
   }
 
   // Add to the end of the list.
   LastExtension->NextExtension.setPointer(extension);
   LastExtension = extension;
+
+  addedExtension(extension);
 }
 
 ArrayRef<VarDecl *> NominalTypeDecl::getStoredProperties() const {
